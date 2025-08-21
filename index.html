@@ -10,34 +10,73 @@
   <script src="https://www.gstatic.com/dialogflow-console/fast/df-messenger/prod/v1/df-messenger.js"></script>
 
   <style>
-    body{margin:0;font-family:system-ui,"Segoe UI",Arial,sans-serif}
-    .wrap{max-width:900px;margin:0 auto;padding:24px}
+    :root{
+      /* שקיפות/חוזק של שכבת הריכוך מעל התמונה */
+      --bg-tint: rgba(255,255,255,.82);
+      --card-bg: rgba(255,255,255,.85);
+    }
+    @media (prefers-color-scheme: dark){
+      :root{
+        --bg-tint: rgba(0,0,0,.38);
+        --card-bg: rgba(0,0,0,.35);
+      }
+      body, p{ color:#f1f1f1 }
+    }
+
+    body{
+      margin:0;
+      font-family:system-ui,"Segoe UI",Arial,sans-serif;
+
+      /* רקע: תמונה + שכבת שקיפות מעליה */
+      background:
+        linear-gradient(var(--bg-tint), var(--bg-tint)),
+        url('gem.png') center / cover fixed no-repeat;
+      min-height:100dvh;
+      -webkit-font-smoothing:antialiased;
+      -moz-osx-font-smoothing:grayscale;
+    }
+    .wrap{
+      max-width:900px;margin:0 auto;padding:24px 24px 120px;
+      background: var(--card-bg);
+      border-radius: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,.08);
+      backdrop-filter: blur(2px);
+      margin-top:16px;
+    }
     h1{margin:0 0 8px}
     p{margin:0 0 12px;color:#444}
-    .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+
     df-messenger{
       position:fixed;bottom:16px;right:16px;z-index:999;direction:rtl;
       --df-messenger-font-family:system-ui,"Segoe UI",Arial,sans-serif;
     }
-    button{padding:10px 14px;border:0;border-radius:999px;cursor:pointer;font-size:16px}
-    #micBtn{background:#0b57d0;color:#fff;min-width:140px}
+    #micBtn{
+      position:fixed;bottom:90px;right:16px;z-index:1000;
+      padding:10px 14px;border:0;border-radius:999px;
+      background:#0b57d0;color:#fff;cursor:pointer;font-size:16px;min-width:160px
+    }
     #micBtn[aria-busy="true"]{background:#d00}
-    #testBtn{background:#eee}
-    #status{font-size:13px;color:#666}
-    pre.log{background:#111;color:#0f0;padding:8px;border-radius:6px;max-height:160px;overflow:auto;font-size:12px;display:none}
+    #status{position:fixed;bottom:60px;right:16px;font-size:12px;color:#666}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>הבוט הקולי - מענק עבודה</h1>
-    <p>לחצו על 🎤, דברו — הבוט יכתוב בצ׳אט ויקרא את התשובה בקול.</p>
-    <div class="actions">
-      <button id="micBtn"  type="button" title="דבר/י">🎤 דבר/י</button>
-      <button id="testBtn" type="button" title="בדיקת TTS">🔊 בדיקת קול</button>
-      <span id="status"></span>
-    </div>
-    <pre id="debugLog" class="log"></pre>
-  </div>
+<div class="wrap" 
+     style="position: absolute; 
+            top: 80px;        /* יוריד למטה */
+            left: 61%;         /* קרוב לאמצע */
+            transform: translateX(-45%); 
+            margin: 0; 
+            padding: 20px 30px; 
+            background: rgba(255,255,255,0.95); 
+            border-radius: 12px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+  <h1 style="margin: 0;">הבוט הקולי - מענק עבודה</h1>
+  <p style="margin: 6px 0 0 0;">לחץ/י על 🎤, דבר/י – השאלה תישלח ותוצג בצ'אט, והבוט יקריא <strong>רק</strong> כששלחת בקול.</p>
+</div>
+
+
+  <button id="micBtn" type="button" title="דבר/י">🎤 דבר/י</button>
+  <span id="status"></span>
 
   <df-messenger
     project-id="sandbox-kosta-test"
@@ -51,163 +90,422 @@
   <audio id="ttsAudio"></audio>
 
   <script>
-  (()=>{
-    // === שים כאן מפתח API של Google Cloud Text-to-Speech ===
+  (() => {
+    // ===== מפתח Google TTS שסיפקת =====
     const GCP_TTS_API_KEY = 'AIzaSyCK_SVmworiDMH9iE5L1lvjh4cdA6KB92I';
 
-    const df   = document.querySelector('df-messenger');
-    const mic  = document.getElementById('micBtn');
-    const test = document.getElementById('testBtn');
-    const outA = document.getElementById('ttsAudio');
-    const statusEl = document.getElementById('status');
-    const logEl    = document.getElementById('debugLog');
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const df      = document.querySelector('df-messenger');
+    const bubble  = document.querySelector('df-messenger-chat-bubble');
+    const mic     = document.getElementById('micBtn');
+    const outA    = document.getElementById('ttsAudio');
+    const SR      = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const statusEl= document.getElementById('status');
 
-    function setStatus(t){ statusEl.textContent = t||''; }
-    function log(...a){ console.log('[TTS]', ...a); try{ logEl.style.display='block'; logEl.textContent += a.map(x=>typeof x==='string'?x:JSON.stringify(x,null,2)).join(' ')+'\n'; }catch{} }
+    const log = (...a)=>console.log('[VOICE]', ...a);
+    const setStatus = (s)=>{ statusEl.textContent = s || ''; };
 
-    // Messenger ready
+    // ---------- helpers ----------
+    const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
+    function queryDeepAll(root, selector){
+      const out=[]; const walk=(node)=>{
+        if (!node) return;
+        const scope = node.shadowRoot || node;
+        try { scope.querySelectorAll?.(selector)?.forEach(el=>out.push(el)); } catch(_){}
+        const kids = scope.children || [];
+        for (const c of kids){ if (c.shadowRoot) walk(c.shadowRoot); walk(c); }
+      };
+      walk(root); return out;
+    }
+    function queryDeep(root, selector){ const all=queryDeepAll(root,selector); return all[0]||null; }
+
+    async function openChatBubble(){
+      try { if (bubble?.openChat) { bubble.openChat(); return true; } } catch(_){}
+      try {
+        const root = df.shadowRoot || df;
+        const btn = queryDeep(root, 'df-messenger-chat-bubble button,[role="button"],button[aria-label*="Open"],button[aria-label*="פתח"]');
+        if (btn) { btn.click(); return true; }
+      } catch(_){}
+      return false;
+    }
+
+    // ---------- Messenger ready ----------
     const messengerReady = (async ()=>{
       if (!customElements.get('df-messenger')) {
         await customElements.whenDefined('df-messenger');
       }
+      for (let i=0;i<10;i++){
+        const ok = await openChatBubble();
+        if (ok) break;
+        await sleep(200);
+      }
       return true;
     })();
 
-    // ===== Local Hebrew TTS if available =====
+    // ---------- ניקוי “קשקושים” בתחילת הטקסט בלבד ----------
+    function cleanStart(s){
+      if (!s) return '';
+      let t = String(s).trim();
+      t = t.replace(/^(\s*(?:https?:\/\/\S+|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{16,}|(?:text|normal|utterance|voice|he-il|en-us)[\w\-]*|[A-Za-z0-9+/_=-]{16,}))+\s*[:,\-]*/i, '');
+      const iHeb = t.search(/[\u0590-\u05FF]/);
+      if (iHeb > 0) t = t.slice(iHeb);
+      return t.replace(/\s{2,}/g,' ').trim();
+    }
+
+    // ---------- דה-דופליקציה + Gate לקול בלבד ----------
+    let lastUserText = '';
+    let lastSpoken   = '';
+
+    let voiceGate = false;
+    let voiceGateTimer = null;
+    function enableVoiceGate(ms=25000){
+      voiceGate = true;
+      clearTimeout(voiceGateTimer);
+      voiceGateTimer = setTimeout(()=>{ voiceGate=false; }, ms);
+      log('gate=ON (', ms,'ms)');
+    }
+    function consumeGate(){
+      voiceGate = false;
+      clearTimeout(voiceGateTimer);
+      log('gate=OFF');
+    }
+
+    function shouldSpeak(txt){
+      if (!voiceGate) return false;
+      const clean = cleanStart((txt||'').replace(/\s+/g,' '));
+      if (!clean) return false;
+      if (clean === lastUserText) return false;
+      if (clean === lastSpoken)   return false;
+      lastSpoken = clean;
+      return true;
+    }
+
+    function speakFrom(source, txt){
+      const cleaned = cleanStart(txt);
+      if (!shouldSpeak(cleaned)) return;
+      consumeGate();
+      log('speakFrom:', source, 'len=', cleaned.length, 'text=', cleaned.slice(0,80));
+      speak(cleaned);
+    }
+
+    // ---------- איסוף טקסטים ----------
+    function collectStringsDeep(obj, max=8000){
+      const seen = new Set();
+      const out = [];
+      const stack = [obj];
+      let guard = 0;
+      while (stack.length && guard++ < 8000){
+        const x = stack.pop();
+        if (!x) continue;
+        if (typeof x === 'string'){
+          const s = cleanStart(x);
+          if (s && !/^https?:\/\//.test(s) && s.length >= 2) out.push(s);
+          continue;
+        }
+        if (typeof x !== 'object') continue;
+        if (seen.has(x)) continue; seen.add(x);
+        if (Array.isArray(x)){ for (const it of x) stack.push(it); continue; }
+        for (const k in x) { try { stack.push(x[k]); } catch(_){} }
+        if (out.join(' ').length > max) break;
+      }
+      const joined = out.filter(t=>/[\u0590-\u05FF]/.test(t)).join(' ');
+      return joined.trim();
+    }
+
+    // ---------- extract known DF structures ----------
+    function extractFromQueryResult(qr){
+      try{
+        const msgs = qr?.responseMessages || [];
+        const parts = [];
+        for (const m of msgs) {
+          if (m.text?.text?.length) parts.push(...m.text.text);
+
+          const p = m.payload;
+          if (p?.fields) {
+            const f = m.payload.fields;
+            if (f.text?.stringValue)   parts.push(f.text.stringValue);
+            if (f.answer?.stringValue) parts.push(f.answer.stringValue);
+            const list = f.texts?.listValue?.values || [];
+            for (const v of list) if (v.stringValue) parts.push(v.stringValue);
+          }
+
+          if (Array.isArray(m.richContent) && m.richContent.length) {
+            const flat = m.richContent.flat?.(Infinity) || [];
+            for (const item of flat) {
+              if (typeof item?.text     === 'string') parts.push(item.text);
+              if (typeof item?.title    === 'string') parts.push(item.title);
+              if (typeof item?.subtitle === 'string') parts.push(item.subtitle);
+              if (Array.isArray(item?.text))  parts.push(item.text.join(' '));
+              if (Array.isArray(item?.title)) parts.push(item.title.join(' '));
+            }
+          }
+        }
+        let txt = cleanStart(parts.join(' ').replace(/\s+/g,' ').trim());
+        if (!txt) txt = collectStringsDeep(qr);
+        return cleanStart(txt);
+      }catch{ return ''; }
+    }
+
+    // ---------- UI fallback ----------
+    function lastMessageFromUI(){
+      const root = df.shadowRoot || df;
+      const selectors = [
+        'df-message',
+        '[data-message-text]',
+        '.text, .message, .bubble',
+        '*'
+      ];
+      let best = '';
+      for (const sel of selectors){
+        const nodes = queryDeepAll(root, sel);
+        for (const el of nodes){
+          const tag = (el.tagName||'').toLowerCase();
+          if (['textarea','input','button','df-messenger-chat-bubble'].includes(tag)) continue;
+          const t = cleanStart((el.innerText||'').replace(/\s+/g,' ').trim());
+          if (!/[\u0590-\u05FF]/.test(t)) continue;
+          if (t && t.length > best.length && t !== lastUserText) best = t;
+        }
+        if (best) break;
+      }
+      return best;
+    }
+
+    // ---------- TTS: פיצול כדי לא לעבור 5000 bytes ----------
+    function utf8BytesLen(s){ try{ return new TextEncoder().encode(s).length; } catch{ return s.length*2; } }
+    function chunkByBytes(text, maxBytes=4000){
+      const sentences = text
+        .split(/(?<=[\.\!\?\:\;…]|[\.]{3}|\n)/g)
+        .map(s=>s.trim()).filter(Boolean);
+      const chunks = [];
+      let cur = '';
+      for (const s of sentences.length?sentences:[text]){
+        const candidate = (cur ? (cur+' '+s) : s).trim();
+        if (utf8BytesLen(candidate) <= maxBytes){
+          cur = candidate;
+        } else {
+          if (cur) chunks.push(cur);
+          if (utf8BytesLen(s) > maxBytes){
+            let part = '';
+            for (const ch of s){
+              const cand = part + ch;
+              if (utf8BytesLen(cand) > maxBytes){ chunks.push(part); part=''; }
+              part += ch;
+            }
+            if (part) chunks.push(part.trim());
+            cur = '';
+          } else {
+            cur = s;
+          }
+        }
+      }
+      if (cur) chunks.push(cur);
+      return chunks;
+    }
+
     function getLocalHebrewVoice(){
       try{
         const vs = speechSynthesis.getVoices() || [];
         return vs.find(v => (v.lang||'').toLowerCase().startsWith('he')) || null;
       }catch{ return null; }
     }
-    function speakLocal(text){
-      if (!('speechSynthesis' in window)) return false;
-      const v = getLocalHebrewVoice();
-      if (!v) return false;
-      try { speechSynthesis.cancel(); } catch(_){}
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'he-IL'; u.voice = v;
-      speechSynthesis.speak(u);
-      log('Local voice:', v.name, v.lang);
-      return true;
-    }
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.addEventListener('voiceschanged', ()=>getLocalHebrewVoice());
+
+    function speakLocalChunk(text){
+      return new Promise((resolve)=>{
+        if (!('speechSynthesis' in window)) return resolve(false);
+        const v = getLocalHebrewVoice();
+        if (!v) return resolve(false);
+        try { speechSynthesis.cancel(); } catch(_){}
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = 'he-IL'; u.voice = v;
+        u.onend = ()=>resolve(true);
+        u.onerror = ()=>resolve(false);
+        setStatus('🔊 מקריא…');
+        speechSynthesis.speak(u);
+      });
     }
 
-    // ===== Cloud TTS (עם לוג שגיאה מפורט) =====
-    async function speakCloud(text){
-      if (!GCP_TTS_API_KEY) { setStatus('אין API key'); return false; }
-      const url = 'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + encodeURIComponent(GCP_TTS_API_KEY);
-      const body = {
-        input: { text },
-        voice: { languageCode: 'he-IL' }, // בלי שם קול כדי להימנע משגיאות Voice Not Found
-        audioConfig: { audioEncoding: 'MP3' }
-      };
+    async function speakCloudChunk(text){
       try{
-        const res = await fetch(url, {
+        const res = await fetch('https://texttospeech.googleapis.com/v1/text:synthesize?key='+encodeURIComponent(GCP_TTS_API_KEY),{
           method:'POST',
           headers:{'Content-Type':'application/json'},
-          body: JSON.stringify(body)
+          body: JSON.stringify({
+            input:{ text },
+            voice:{ languageCode:'he-IL' },
+            audioConfig:{ audioEncoding:'MP3' }
+          })
         });
-        log('HTTP status:', res.status);
-        const textResp = await res.text();
-        let json;
-        try { json = JSON.parse(textResp); } catch { json = { raw:textResp }; }
-        log('Response:', json);
-
-        if (!res.ok){
-          const msg = (json && json.error && (json.error.message || json.error.status)) || 'Bad Request';
-          setStatus('TTS נכשל ('+res.status+'): ' + msg);
+        if (!res.ok) {
+          const txt = await res.text();
+          console.warn('TTS error', res.status, txt);
+          setStatus('TTS '+res.status);
           return false;
         }
-
-        const b64 = json.audioContent;
-        if (!b64){ setStatus('אין audioContent'); return false; }
-        outA.src = 'data:audio/mp3;base64,' + b64;
-        await outA.play();
-        setStatus('');
+        const data = await res.json();
+        if (!data.audioContent) return false;
+        outA.src = 'data:audio/mp3;base64,'+data.audioContent;
+        setStatus('🔊 מקריא…');
+        await outA.play().catch(()=>{});
         return true;
       }catch(e){
-        log('Fetch error:', e);
-        setStatus('שגיאת רשת ב-TTS (ראה קונסול/לוג למעלה)');
+        console.warn('TTS fetch error', e);
         return false;
+      } finally {
+        setStatus('');
       }
     }
 
     async function speak(text){
-      // אם יש קול עברי מקומי – נשתמש בו; אחרת ענן
-      if (speakLocal(text)) return;
-      await speakCloud(text);
+      const cleaned = cleanStart(text);
+      if (!cleaned) return;
+      const chunks = chunkByBytes(cleaned, 4000);
+      for (const ch of chunks){
+        const okLocal = await speakLocalChunk(ch);
+        if (!okLocal) await speakCloudChunk(ch);
+        await sleep(80);
+      }
     }
 
-    // ===== extract text from bot response =====
-    function extractText(resp){
-      try{
-        const msgs = resp?.queryResult?.responseMessages || [];
-        const arr = [];
-        for (const m of msgs) if (m.text?.text?.length) arr.push(...m.text.text);
-        return arr.join(' ').trim();
-      }catch{ return ''; }
-    }
+    // ---------- 1) df-response-received ----------
     df.addEventListener('df-response-received', (e)=>{
-      const txt = extractText(e.detail?.response);
-      if (txt) speak(txt);
+      log('event: df-response-received');
+      const qr  = e.detail?.response?.queryResult;
+      let txt   = extractFromQueryResult(qr);
+      if (!txt) {
+        setTimeout(()=>{ const uiTxt = lastMessageFromUI(); if (uiTxt) speakFrom('response+ui', uiTxt); }, 300);
+      } else {
+        speakFrom('response', txt);
+      }
     });
 
-    // ===== send + render =====
+    // ---------- 2) registerMessageConsumer ----------
+    messengerReady.then(()=>{
+      if (typeof df.registerMessageConsumer === 'function') {
+        try{
+          const consumer = {
+            addMessages(messages){
+              console.log('[DF] consumer addMessages count=', (messages||[]).length);
+              try{
+                let parts = [];
+                for (const msg of (messages||[])) {
+                  const m = msg?.message || msg;
+                  if (!m) continue;
+                  if (Array.isArray(m?.text?.text)) parts.push(...m.text.text);
+                  if (typeof m?.text === 'string')   parts.push(m.text);
+                  if (m?.payload?.fields) {
+                    const f = m.payload.fields;
+                    if (f.text?.stringValue)   parts.push(f.text.stringValue);
+                    if (f.answer?.stringValue) parts.push(f.answer.stringValue);
+                    const list = f.texts?.listValue?.values || [];
+                    for (const v of list) if (v.stringValue) parts.push(v.stringValue);
+                  }
+                  if (Array.isArray(m?.richContent)) {
+                    const flat = m.richContent.flat?.(Infinity) || [];
+                    flat.forEach(item=>{
+                      if (typeof item?.text     === 'string') parts.push(item.text);
+                      if (typeof item?.title    === 'string') parts.push(item.title);
+                      if (typeof item?.subtitle === 'string') parts.push(item.subtitle);
+                    });
+                  }
+                }
+                let txt = cleanStart(parts.join(' ').replace(/\s+/g,' ').trim());
+                if (!txt) txt = collectStringsDeep(messages, 8000);
+
+                if (!txt) {
+                  setTimeout(()=>{ const uiTxt = lastMessageFromUI(); if (uiTxt) speakFrom('consumer+ui', uiTxt); }, 220);
+                } else {
+                  speakFrom('consumer', txt);
+                }
+              }catch(e){ console.warn('addMessages parse error', e); }
+            }
+          };
+          df.registerMessageConsumer(consumer);
+          console.log('[DF] message consumer registered');
+        }catch(e){
+          console.warn('registerMessageConsumer failed', e);
+        }
+      }
+    });
+
+    // ---------- 3) MutationObserver (גיבוי) ----------
+    async function setupUiObserver(){
+      await messengerReady;
+      const root = df.shadowRoot || df;
+      const chat = queryDeep(root, 'df-messenger-chat') || root;
+      const obs = new MutationObserver(()=>{
+        const txt = lastMessageFromUI();
+        if (txt) speakFrom('observer', txt);
+      });
+      obs.observe(chat, { childList:true, subtree:true, characterData:true });
+      setTimeout(()=>{ const t = lastMessageFromUI(); if (t) speakFrom('observer-initial', t); }, 800);
+    }
+    messengerReady.then(setupUiObserver);
+
+    // ---------- send wrapper ----------
+    messengerReady.then(()=>{
+      if (typeof df.sendQuery === 'function'){
+        const orig = df.sendQuery.bind(df);
+        df.sendQuery = (text)=>{
+          log('sendQuery-wrap: sending:', text);
+          return orig(text).then(resp=>{
+            try{
+              const t = extractFromQueryResult(resp?.queryResult);
+              if (t) speakFrom('sendQuery-wrap', t);
+              else setTimeout(()=>{ const uiTxt = lastMessageFromUI(); if (uiTxt) speakFrom('sendQuery-ui', uiTxt); }, 250);
+            }catch(_){}
+            return resp;
+          });
+        };
+      }
+    });
+
+    // ---------- send + render (נדלק gate רק כאן!) ----------
     async function sendToBotAndRender(text){
       await messengerReady;
-      try { df.renderCustomText(text); } catch(_) {}
+      lastUserText = cleanStart(text);
+      enableVoiceGate(25000);
+      try { df.renderCustomText(text, false); } catch(_){}
       return df.sendQuery(text);
     }
 
-    // ===== STT =====
+    // ---------- STT ----------
     if (!SR) {
       mic.disabled = true;
       mic.textContent = '🎤 לא נתמך בדפדפן זה';
       mic.title = 'Web Speech API לא זמין. מומלץ Chrome/Edge.';
-    } else {
-      mic.addEventListener('click', async ()=>{
-        mic.setAttribute('aria-busy','true');
-        const old = mic.textContent;
-        mic.textContent = '🎙️ מקשיב...';
-
-        try { await navigator.mediaDevices.getUserMedia({ audio:true }); }
-        catch(e){ mic.textContent='❌ אין הרשאת מיקרופון'; mic.removeAttribute('aria-busy'); return; }
-
-        await messengerReady;
-
-        const r = new SR();
-        r.lang = 'he-IL';
-        r.interimResults = false;
-        r.continuous     = false;
-        let finalText = '';
-
-        r.onresult = (ev)=>{ finalText = ev.results[0][0].transcript || ''; };
-        r.onerror  = (ev)=>{ console.warn('[STT] error', ev); finalText=''; };
-        r.onend    = async ()=>{
-          mic.textContent = old;
-          mic.removeAttribute('aria-busy');
-          finalText = (finalText||'').trim();
-          if (finalText) { try { await sendToBotAndRender(finalText); } catch(e){ console.warn(e); } }
-        };
-
-        try { r.start(); } catch(e) { mic.textContent = old; mic.removeAttribute('aria-busy'); }
-      });
+      return;
     }
 
-    // ===== manual TTS test =====
-    test.addEventListener('click', async ()=>{
-      setStatus('בודק TTS...');
-      logEl.textContent = ''; logEl.style.display='block';
-      const okLocal = speakLocal('בדיקת קול בעברית'); // אם יש – יתנגן מיד
-      if (!okLocal) await speakCloud('בדיקת קול בעברית');
-    });
+    mic.addEventListener('click', async ()=>{
+      mic.setAttribute('aria-busy','true');
+      const old = mic.textContent;
+      mic.textContent = '🎙️ מקשיב...';
 
-    // טיפ: אם אתה מריץ בתצוגת VSCode (Webview) – ייתכן שחוסם רשת.
-    // תבדוק בדפדפן רגיל (GitHub Pages / Live Server מקומי).
+      try { await navigator.mediaDevices.getUserMedia({ audio:true }); }
+      catch(e){ mic.textContent='❌ אין הרשאת מיקרופון'; mic.removeAttribute('aria-busy'); return; }
+
+      await messengerReady;
+
+      const r = new SR();
+      r.lang = 'he-IL';
+      r.interimResults = false;
+      r.continuous     = false;
+      let finalText = '';
+
+      r.onresult = (ev)=>{ finalText = ev.results[0][0].transcript || ''; };
+      r.onerror  = ()=>{ finalText = ''; };
+      r.onend    = async ()=>{
+        mic.textContent = old;
+        mic.removeAttribute('aria-busy');
+        finalText = (finalText||'').trim();
+        if (finalText) { try { await sendToBotAndRender(finalText); } catch(e){} }
+        else { voiceGate = false; }
+      };
+
+      try { r.start(); } catch(e) {
+        mic.textContent = old;
+        mic.removeAttribute('aria-busy');
+      }
+    });
   })();
   </script>
 </body>
