@@ -14,25 +14,30 @@
     .wrap{max-width:900px;margin:0 auto;padding:24px}
     h1{margin:0 0 8px}
     p{margin:0 0 12px;color:#444}
+    .actions{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
     df-messenger{
       position:fixed;bottom:16px;right:16px;z-index:999;direction:rtl;
       --df-messenger-font-family:system-ui,"Segoe UI",Arial,sans-serif;
     }
-    #micBtn{
-      position:fixed;bottom:90px;right:16px;z-index:1000;
-      padding:10px 14px;border:0;border-radius:999px;
-      background:#0b57d0;color:#fff;cursor:pointer;font-size:16px;min-width:160px
-    }
+    button{padding:10px 14px;border:0;border-radius:999px;cursor:pointer;font-size:16px}
+    #micBtn{background:#0b57d0;color:#fff;min-width:140px}
     #micBtn[aria-busy="true"]{background:#d00}
+    #testBtn{background:#eee}
+    #status{font-size:13px;color:#666}
+    pre.log{background:#111;color:#0f0;padding:8px;border-radius:6px;max-height:160px;overflow:auto;font-size:12px;display:none}
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1>הבוט הקולי - מענק עבודה</h1>
-    <p>לחץ/י על 🎤, דבר/י — והבוט ישלח את השאלה ויקרא את התשובה בקול.</p>
+    <p>לחצו על 🎤, דברו — הבוט יכתוב בצ׳אט ויקרא את התשובה בקול.</p>
+    <div class="actions">
+      <button id="micBtn"  type="button" title="דבר/י">🎤 דבר/י</button>
+      <button id="testBtn" type="button" title="בדיקת TTS">🔊 בדיקת קול</button>
+      <span id="status"></span>
+    </div>
+    <pre id="debugLog" class="log"></pre>
   </div>
-
-  <button id="micBtn" type="button" title="דבר/י">🎤 דבר/י</button>
 
   <df-messenger
     project-id="sandbox-kosta-test"
@@ -47,15 +52,21 @@
 
   <script>
   (()=>{
-    // ==== החלף במפתח API של Google Cloud Text-to-Speech (פשוט לדמו) ====
+    // === שים כאן מפתח API של Google Cloud Text-to-Speech ===
     const GCP_TTS_API_KEY = 'AIzaSyCK_SVmworiDMH9iE5L1lvjh4cdA6KB92I';
 
     const df   = document.querySelector('df-messenger');
     const mic  = document.getElementById('micBtn');
-    const SR   = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const test = document.getElementById('testBtn');
     const outA = document.getElementById('ttsAudio');
+    const statusEl = document.getElementById('status');
+    const logEl    = document.getElementById('debugLog');
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    // הבטחת טעינת המנגנון
+    function setStatus(t){ statusEl.textContent = t||''; }
+    function log(...a){ console.log('[TTS]', ...a); try{ logEl.style.display='block'; logEl.textContent += a.map(x=>typeof x==='string'?x:JSON.stringify(x,null,2)).join(' ')+'\n'; }catch{} }
+
+    // Messenger ready
     const messengerReady = (async ()=>{
       if (!customElements.get('df-messenger')) {
         await customElements.whenDefined('df-messenger');
@@ -63,14 +74,75 @@
       return true;
     })();
 
-    // ====== שליחה: כותב את המלל בצ'אט (כמשתמש) ושולח לבוט ======
-    async function sendToBotAndRender(text){
-      await messengerReady;
-      try { df.renderCustomText(text); } catch(_) {}
-      return df.sendQuery(text);
+    // ===== Local Hebrew TTS if available =====
+    function getLocalHebrewVoice(){
+      try{
+        const vs = speechSynthesis.getVoices() || [];
+        return vs.find(v => (v.lang||'').toLowerCase().startsWith('he')) || null;
+      }catch{ return null; }
+    }
+    function speakLocal(text){
+      if (!('speechSynthesis' in window)) return false;
+      const v = getLocalHebrewVoice();
+      if (!v) return false;
+      try { speechSynthesis.cancel(); } catch(_){}
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'he-IL'; u.voice = v;
+      speechSynthesis.speak(u);
+      log('Local voice:', v.name, v.lang);
+      return true;
+    }
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.addEventListener('voiceschanged', ()=>getLocalHebrewVoice());
     }
 
-    // ====== חילוץ טקסטים מתשובת ה-Agent ======
+    // ===== Cloud TTS (עם לוג שגיאה מפורט) =====
+    async function speakCloud(text){
+      if (!GCP_TTS_API_KEY) { setStatus('אין API key'); return false; }
+      const url = 'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + encodeURIComponent(GCP_TTS_API_KEY);
+      const body = {
+        input: { text },
+        voice: { languageCode: 'he-IL' }, // בלי שם קול כדי להימנע משגיאות Voice Not Found
+        audioConfig: { audioEncoding: 'MP3' }
+      };
+      try{
+        const res = await fetch(url, {
+          method:'POST',
+          headers:{'Content-Type':'application/json'},
+          body: JSON.stringify(body)
+        });
+        log('HTTP status:', res.status);
+        const textResp = await res.text();
+        let json;
+        try { json = JSON.parse(textResp); } catch { json = { raw:textResp }; }
+        log('Response:', json);
+
+        if (!res.ok){
+          const msg = (json && json.error && (json.error.message || json.error.status)) || 'Bad Request';
+          setStatus('TTS נכשל ('+res.status+'): ' + msg);
+          return false;
+        }
+
+        const b64 = json.audioContent;
+        if (!b64){ setStatus('אין audioContent'); return false; }
+        outA.src = 'data:audio/mp3;base64,' + b64;
+        await outA.play();
+        setStatus('');
+        return true;
+      }catch(e){
+        log('Fetch error:', e);
+        setStatus('שגיאת רשת ב-TTS (ראה קונסול/לוג למעלה)');
+        return false;
+      }
+    }
+
+    async function speak(text){
+      // אם יש קול עברי מקומי – נשתמש בו; אחרת ענן
+      if (speakLocal(text)) return;
+      await speakCloud(text);
+    }
+
+    // ===== extract text from bot response =====
     function extractText(resp){
       try{
         const msgs = resp?.queryResult?.responseMessages || [];
@@ -79,110 +151,63 @@
         return arr.join(' ').trim();
       }catch{ return ''; }
     }
-
-    // ====== TTS הכי פשוט: אם אין קול עברי מקומי — ענן ======
-    function localHebrewVoice(){
-      try{
-        const vs = speechSynthesis.getVoices() || [];
-        return vs.find(v => (v.lang||'').toLowerCase().startsWith('he')) || null;
-      }catch{ return null; }
-    }
-
-    function speakLocal(text){
-      if (!('speechSynthesis' in window)) return false;
-      const v = localHebrewVoice();
-      if (!v) return false;
-      try { speechSynthesis.cancel(); } catch(_){}
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'he-IL'; u.voice = v;
-      speechSynthesis.speak(u);
-      return true;
-    }
-
-    async function speakCloud(text){
-      if (!GCP_TTS_API_KEY) return false;
-      try{
-        const res = await fetch(
-          'https://texttospeech.googleapis.com/v1/text:synthesize?key=' + encodeURIComponent(GCP_TTS_API_KEY),
-          {
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({
-              input: { text },
-              voice: { languageCode:'he-IL', name:'he-IL-Standard-A' }, // פשוט וקיים
-              audioConfig: { audioEncoding:'MP3' }
-            })
-          }
-        );
-        if (!res.ok) throw new Error('TTS HTTP ' + res.status);
-        const data = await res.json();
-        if (!data.audioContent) throw new Error('no audioContent');
-        outA.src = 'data:audio/mp3;base64,' + data.audioContent;
-        await outA.play().catch(()=>{});
-        return true;
-      }catch(e){
-        console.warn('Cloud TTS failed:', e);
-        return false;
-      }
-    }
-
-    async function speak(text){
-      // נסה מקומי; אם אין עברית — ענן
-      if (speakLocal(text)) return;
-      await speakCloud(text);
-    }
-
-    // ====== כשמגיעה תשובה מהבוט — מקריאים ======
     df.addEventListener('df-response-received', (e)=>{
       const txt = extractText(e.detail?.response);
       if (txt) speak(txt);
     });
 
-    // ====== STT בסיסי ======
+    // ===== send + render =====
+    async function sendToBotAndRender(text){
+      await messengerReady;
+      try { df.renderCustomText(text); } catch(_) {}
+      return df.sendQuery(text);
+    }
+
+    // ===== STT =====
     if (!SR) {
       mic.disabled = true;
       mic.textContent = '🎤 לא נתמך בדפדפן זה';
       mic.title = 'Web Speech API לא זמין. מומלץ Chrome/Edge.';
-      return;
+    } else {
+      mic.addEventListener('click', async ()=>{
+        mic.setAttribute('aria-busy','true');
+        const old = mic.textContent;
+        mic.textContent = '🎙️ מקשיב...';
+
+        try { await navigator.mediaDevices.getUserMedia({ audio:true }); }
+        catch(e){ mic.textContent='❌ אין הרשאת מיקרופון'; mic.removeAttribute('aria-busy'); return; }
+
+        await messengerReady;
+
+        const r = new SR();
+        r.lang = 'he-IL';
+        r.interimResults = false;
+        r.continuous     = false;
+        let finalText = '';
+
+        r.onresult = (ev)=>{ finalText = ev.results[0][0].transcript || ''; };
+        r.onerror  = (ev)=>{ console.warn('[STT] error', ev); finalText=''; };
+        r.onend    = async ()=>{
+          mic.textContent = old;
+          mic.removeAttribute('aria-busy');
+          finalText = (finalText||'').trim();
+          if (finalText) { try { await sendToBotAndRender(finalText); } catch(e){ console.warn(e); } }
+        };
+
+        try { r.start(); } catch(e) { mic.textContent = old; mic.removeAttribute('aria-busy'); }
+      });
     }
 
-    mic.addEventListener('click', async ()=>{
-      mic.setAttribute('aria-busy','true');
-      const old = mic.textContent;
-      mic.textContent = '🎙️ מקשיב...';
-
-      // בקשת הרשאת מיקרופון (וגם "מחווה משתמש" שתאפשר ניגון אודיו)
-      try { await navigator.mediaDevices.getUserMedia({ audio:true }); } catch(e){
-        mic.textContent = '❌ אין הרשאת מיקרופון';
-        mic.removeAttribute('aria-busy'); return;
-      }
-
-      await messengerReady;
-
-      const r = new SR();
-      r.lang = 'he-IL';
-      r.interimResults = false;   // פשוט: רק תוצאה סופית
-      r.continuous     = false;
-
-      let finalText = '';
-      r.onresult = (ev)=>{ finalText = ev.results[0][0].transcript || ''; };
-      r.onerror  = ()=>{ finalText = ''; };
-      r.onend    = async ()=>{
-        mic.textContent = old;
-        mic.removeAttribute('aria-busy');
-        finalText = (finalText||'').trim();
-        if (finalText) {
-          try { await sendToBotAndRender(finalText); } catch(e){ console.warn(e); }
-        } else {
-          mic.title = 'לא זוהה דיבור. נסה/י שוב.';
-        }
-      };
-
-      try { r.start(); } catch(e) {
-        mic.textContent = old;
-        mic.removeAttribute('aria-busy');
-      }
+    // ===== manual TTS test =====
+    test.addEventListener('click', async ()=>{
+      setStatus('בודק TTS...');
+      logEl.textContent = ''; logEl.style.display='block';
+      const okLocal = speakLocal('בדיקת קול בעברית'); // אם יש – יתנגן מיד
+      if (!okLocal) await speakCloud('בדיקת קול בעברית');
     });
+
+    // טיפ: אם אתה מריץ בתצוגת VSCode (Webview) – ייתכן שחוסם רשת.
+    // תבדוק בדפדפן רגיל (GitHub Pages / Live Server מקומי).
   })();
   </script>
 </body>
