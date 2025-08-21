@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>הבוט הקולי - מענק עבודה</title>
 
-  <!-- favicon קטן 44444444 -->
+  <!-- favicon קטן כדי למנוע 404 -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎤%3C/text%3E%3C/svg%3E">
 
   <!-- Dialogflow Messenger -->
@@ -33,15 +33,13 @@
       padding:10px 14px; border:0; border-radius:999px;
       background:#0b57d0; color:#fff; cursor:pointer; font-size:16px;
       box-shadow:0 6px 18px rgba(0,0,0,.18);
-      min-width:140px;
+      min-width:160px;
     }
     #micBtn[aria-busy="true"]{ background:#d00 }
   </style>
 </head>
 <body>
   <div class="wrap">
-    <h1> </h1>
-    <h1> </h1>
     <h1>הבוט הקולי - מענק עבודה</h1>
     <p>דוגמאות: “מה זמן הטיפול למענק?”, “מי זכאי למענק?”, “איך מגישים בקשה?”.</p>
   </div>
@@ -61,94 +59,75 @@
 
   <script>
   (() => {
-    const df     = document.querySelector('df-messenger');
-    const bubble = document.querySelector('df-messenger-chat-bubble');
-    const mic    = document.getElementById('micBtn');
-    const SR     = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const df      = document.querySelector('df-messenger');
+    const bubble  = document.querySelector('df-messenger-chat-bubble');
+    const mic     = document.getElementById('micBtn');
+    const SR      = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-    // המתנה לטעינת הווידג’ט
-    const messengerLoaded = new Promise((resolve) => {
-      if (customElements.get('df-messenger')) resolve();
-      else window.addEventListener('df-messenger-loaded', resolve, { once: true });
-    });
+    // --- מוכנות הווידג'ט ---
+    const messengerReady = (async () => {
+      if (!customElements.get('df-messenger')) {
+        await customElements.whenDefined('df-messenger');
+      }
+      try { bubble.openChat(); } catch(_) {}
+      return true;
+    })();
 
-    // פותח את הבועה אוטומטית עם טעינת הדף
-    messengerLoaded.then(() => { try { bubble.openChat(); } catch(_) {} });
+    // --- TTS יציב (טיפול בטעינת קולות) ---
+    let heVoice = null;
+    function pickVoice(){
+      try{
+        const voices = speechSynthesis.getVoices() || [];
+        heVoice = voices.find(v => (v.lang||'').toLowerCase().startsWith('he')) || null;
+      }catch(_){}
+    }
+    if ('speechSynthesis' in window) {
+      pickVoice();
+      // בחלק מהדפדפנים הקולות נטענים באיחור
+      window.speechSynthesis.addEventListener('voiceschanged', pickVoice);
+    }
+    function speak(text){
+      if (!('speechSynthesis' in window)) return;
+      try { speechSynthesis.cancel(); } catch(_){}
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'he-IL';
+      if (heVoice) u.voice = heVoice;
+      speechSynthesis.speak(u);
+    }
 
-    // TTS על תשובה מהבוט
+    // --- הצגת תשובת הבוט בקול ---
     df.addEventListener('df-response-received', (e) => {
       try {
         const msgs = e.detail?.response?.queryResult?.responseMessages || [];
         const txt  = msgs.flatMap(m => m.text?.text || []).join(' ').trim();
-        if (!txt || !('speechSynthesis' in window)) return;
-        const u = new SpeechSynthesisUtterance(txt);
-        u.lang = 'he-IL';
-        const v = speechSynthesis.getVoices().find(x => (x.lang||'').toLowerCase().startsWith('he'));
-        if (v) u.voice = v;
-        speechSynthesis.speak(u);
+        if (txt) speak(txt);
       } catch(_) {}
     });
 
-    // מצב “בקשה תלויה” כדי לא להיתקע על שליחה
-    let requestInFlight = false;
-    df.addEventListener('df-request-sent',   () => { requestInFlight = true;  });
-    df.addEventListener('df-response-received', () => { requestInFlight = false; });
-    df.addEventListener('df-error',          () => { requestInFlight = false; });
+    // --- ניהול "בקשה תלויה" כדי לא להיתקע על שליחה ---
+    let inFlight = false;
+    df.addEventListener('df-request-sent',      () => { inFlight = true;  });
+    df.addEventListener('df-response-received', () => { inFlight = false; });
+    df.addEventListener('df-error',             () => { inFlight = false; });
 
-    // Fallback מינימלי ל-Shadow DOM אם אין renderCustomText
-    function minimalDomFallbackSend(text) {
-      try {
-        const root = df.shadowRoot;
-        if (!root) throw new Error('no root');
-        const editable = root.querySelector('div[contenteditable="true"], [role="textbox"]');
-        const sendBtn  = root.querySelector('button[aria-label*="Send"], button[aria-label*="שלח"]');
-        if (!editable) throw new Error('no textbox');
-        editable.focus();
-        // הזרקת טקסט
-        document.execCommand('selectAll', false, null);
-        document.execCommand('insertText', false, text);
-        // שליחה
-        if (sendBtn) sendBtn.click();
-        else {
-          editable.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', code:'Enter', bubbles:true }));
-          editable.dispatchEvent(new KeyboardEvent('keyup',   { key:'Enter', code:'Enter', bubbles:true }));
-        }
-        return true;
-      } catch(e) {
-        console.warn('fallback send failed', e);
-        return false;
+    // --- שליחה: גם UI (renderCustomText) וגם לבוט (sendQuery) ---
+    async function sendToBotAndRender(text){
+      await messengerReady;
+
+      // אם יש בקשה רצה – נחכה מעט (עד 6ש')
+      const t0 = Date.now();
+      while (inFlight && Date.now() - t0 < 6000) {
+        await new Promise(r => setTimeout(r, 120));
       }
+
+      // 1) לוג היסטורי: להציג את ההודעה שלך בצ'אט
+      try { df.renderCustomText(text); } catch(_) {}
+
+      // 2) שליחה בפועל לבוט
+      return df.sendQuery(text);
     }
 
-    // שליחה יציבה: קודם API רשמי, אחרת fallback
-    async function sendQueryStable(text) {
-      await messengerLoaded;
-      try { bubble.openChat(); } catch(_) {}
-
-      if (requestInFlight) {
-        // נמתין עד שהבקשה הקודמת תסתיים (או 6 שניות מקס')
-        const t0 = Date.now();
-        while (requestInFlight && Date.now() - t0 < 6000) {
-          await new Promise(r => setTimeout(r, 120));
-        }
-      }
-
-      // 1) API רשמי – renderCustomText
-      if (typeof df.renderCustomText === 'function') {
-        try {
-          df.renderCustomText(text);
-          return;
-        } catch(e) {
-          console.warn('renderCustomText failed, trying fallback...', e);
-        }
-      }
-
-      // 2) Fallback מינימלי
-      const ok = minimalDomFallbackSend(text);
-      if (!ok) throw new Error('Unable to send query');
-    }
-
-    // אם ה-STT לא נתמך
+    // --- STT ---
     if (!SR) {
       mic.disabled = true;
       mic.textContent = '🎤 לא נתמך בדפדפן זה';
@@ -157,24 +136,23 @@
     }
 
     let isListening = false;
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const sleep = (ms)=>new Promise(r=>setTimeout(r,ms));
 
     mic.addEventListener('click', async () => {
       if (isListening) return;
       const old = mic.textContent;
       mic.setAttribute('aria-busy','true');
-      mic.textContent = '⏳ פותח צ׳אט...';
+      mic.textContent = '⏳ מכין מיקרופון...';
 
-      await messengerLoaded;
-      try { bubble.openChat(); } catch(_) {}
-
-      // הרשאת מיקרופון
+      // הרשאת מיקרופון (מחמם ומוודא התקן)
       try { await navigator.mediaDevices.getUserMedia({ audio:true }); }
       catch(e){
         mic.textContent = '❌ אין הרשאת מיקרופון';
         mic.removeAttribute('aria-busy');
         return;
       }
+
+      await messengerReady;
 
       isListening = true;
       mic.textContent = '🎙️ מקשיב...';
@@ -227,12 +205,12 @@
         return;
       }
 
-      // שליחה לבוט (יציב + מניעת "תקוע על שליחה")
+      // שליחה + כתיבה להיסטוריה + TTS תשובה
       try {
         mic.textContent = '📤 שולח...';
-        await sendQueryStable(text);
+        await sendToBotAndRender(text);
       } catch(e) {
-        console.error('send failed', e);
+        console.error('[DF] send failed', e);
       } finally {
         mic.textContent = old;
       }
@@ -241,14 +219,3 @@
   </script>
 </body>
 </html>
-
-
-
-
-
-
-
-
-
-
-
